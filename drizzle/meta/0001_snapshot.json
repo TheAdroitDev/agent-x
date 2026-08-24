@@ -1,6 +1,6 @@
 {
-    "id": "769a402e-0637-4e30-af2f-b59422078c4f",
-    "prevId": "00000000-0000-0000-0000-000000000000",
+    "id": "b3ea4e73-f639-4191-a77c-6d7ba4aad97d",
+    "prevId": "769a402e-0637-4e30-af2f-b59422078c4f",
     "version": "7",
     "dialect": "postgresql",
     "tables": {
@@ -16,6 +16,12 @@
                 },
                 "account_id": {
                     "name": "account_id",
+                    "type": "text",
+                    "primaryKey": false,
+                    "notNull": true
+                },
+                "issuer": {
+                    "name": "issuer",
                     "type": "text",
                     "primaryKey": false,
                     "notNull": true
