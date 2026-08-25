@@ -1,0 +1,16 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/sync",
+      "schedule": "30 2,12 * * *"
+    },
+    {
+      "path": "/api/cron/analyze",
+      "schedule": "45 2,12 * * *"
+    },
+    {
+      "path": "/api/cron/ideas",
+      "schedule": "30 2 * * *"
+    }
+  ]
+}

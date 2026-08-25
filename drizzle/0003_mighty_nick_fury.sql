@@ -1,0 +1,1 @@
+ALTER TABLE "generated_replies" ADD CONSTRAINT "generated_replies_opt_alt_version_idx" UNIQUE("opportunity_id","is_alternative","prompt_version");

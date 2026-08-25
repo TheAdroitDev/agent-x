@@ -1,0 +1,1 @@
+ALTER TABLE "opportunities" ADD CONSTRAINT "opportunities_user_id_post_id_idx" UNIQUE("user_id","post_id");
