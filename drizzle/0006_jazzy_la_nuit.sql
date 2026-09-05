@@ -1,0 +1,1 @@
+ALTER TABLE "posts" ALTER COLUMN "x_username" DROP NOT NULL;
