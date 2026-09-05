@@ -3,6 +3,8 @@ import { opportunities } from "@/db/schema/opportunities";
 import { xUsers } from "@/db/schema/x-users";
 import { eq, sql } from "drizzle-orm";
 import { getCachedSession } from "@/features/auth/lib/session";
+import { DEFAULT_LIMITS } from "@/common/config/constants";
+import { AI_MODEL_PRIMARY, AI_MODEL_FALLBACK } from "@/features/ai/lib/client";
 import { redirect } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { BarChart3, CheckCircle2, XCircle, Activity } from "lucide-react";
@@ -13,6 +15,8 @@ export const metadata = {
   title: "Analytics - AgentX",
 };
 
+const formatCost = (cents: number) => { return (cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 3 }); };
+
 export default async function AnalyticsPage() {
   const session = await getCachedSession();
 
@@ -22,8 +26,7 @@ export default async function AnalyticsPage() {
 
   const userId = session.user.id;
 
-  // Aggregate stats in parallel
-  const [statsResult, relStats, usageStats] = await Promise.all([
+  const [statsResult, relStats, usageStats, funnelStatsResult] = await Promise.all([
     db
       .select({
         total: sql<number>`count(*)::int`,
@@ -42,15 +45,33 @@ export default async function AnalyticsPage() {
         count: sql<number>`count(*)::int`,
       })
       .from(opportunities)
-      .innerJoin(xUsers, eq(opportunities.xUserId, xUsers.xUserId))
+      .leftJoin(xUsers, eq(opportunities.xUserId, xUsers.xUserId))
       .where(eq(opportunities.userId, userId))
       .groupBy(xUsers.isMutual, xUsers.isFollowing),
 
     getUserUsageStats(userId),
+
+    db.execute(sql`
+      SELECT 
+        count(*) as discovered,
+        sum(case when total_score < 40 then 1 else 0 end) as filtered,
+        count(*) as scored,
+        sum(case when total_score >= 40 then 1 else 0 end) as score_gte_40,
+        sum(case when total_score >= 40 and status NOT IN ('DISMISSED', 'ENGAGED', 'EXPIRED') and analyzed_at IS NULL then 1 else 0 end) as eligible,
+        0 as blocked_by_missing_author,
+        sum(case when total_score >= 40 and status IN ('DISMISSED', 'ENGAGED', 'EXPIRED') and analyzed_at IS NULL then 1 else 0 end) as blocked_by_engagement,
+        sum(case when analyzed_at IS NOT NULL then 1 else 0 end) as selected_for_gemini,
+        sum(case when analyzed_at IS NOT NULL and worth_replying = true then 1 else 0 end) as approved,
+        sum(case when analyzed_at IS NOT NULL and worth_replying = false then 1 else 0 end) as rejected,
+        sum(case when total_score >= 40 and status NOT IN ('DISMISSED', 'ENGAGED', 'EXPIRED') and analyzed_at IS NULL then 1 else 0 end) as remaining_queued
+      FROM opportunities
+      WHERE user_id = ${userId}
+    `)
   ]);
 
   const stats = statsResult[0] || { total: 0, engaged: 0, dismissed: 0, avgScore: 0, worthReplying: 0 };
-  const { totalTodayCents, totalMonthCents, dailyBudget, monthBudget, todayPercent, monthPercent, todayUsage, geminiUsage } = usageStats;
+  const funnel = (funnelStatsResult.rows[0] as Record<string, string | number>) || {};
+  const { totalTodayCents, totalMonthCents, dailyBudget, monthBudget, todayPercent, monthPercent, todayUsage, geminiUsage, todayGeminiUsage, userSettings } = usageStats;
 
   let mutualCount = 0;
   let followingCount = 0;
@@ -113,6 +134,55 @@ export default async function AnalyticsPage() {
         </Card>
       </div>
 
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Opportunity Funnel</CardTitle>
+          <p className="text-xs text-muted-foreground mt-1">From discovery to Gemini analysis</p>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-center">
+            <div className="flex flex-col border p-3 rounded-md">
+              <span className="text-2xl font-bold">{funnel.discovered || 0}</span>
+              <span className="text-xs text-muted-foreground">Discovered/Scored</span>
+            </div>
+            <div className="flex flex-col border p-3 rounded-md">
+              <span className="text-2xl font-bold">{funnel.filtered || 0}</span>
+              <span className="text-xs text-muted-foreground">Filtered ({'<'}40)</span>
+            </div>
+            <div className="flex flex-col border p-3 rounded-md bg-accent/50">
+              <span className="text-2xl font-bold">{funnel.score_gte_40 || 0}</span>
+              <span className="text-xs text-muted-foreground">Score &gt;= 40</span>
+            </div>
+            <div className="flex flex-col border p-3 rounded-md">
+              <span className="text-2xl font-bold">{funnel.blocked_by_engagement || 0}</span>
+              <span className="text-xs text-muted-foreground">Blocked (Engaged/Dismissed)</span>
+            </div>
+            <div className="flex flex-col border p-3 rounded-md bg-primary/10">
+              <span className="text-2xl font-bold">{funnel.eligible || 0}</span>
+              <span className="text-xs text-primary font-medium">Eligible for Gemini</span>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-center mt-4">
+            <div className="flex flex-col border p-3 rounded-md">
+              <span className="text-2xl font-bold">{funnel.selected_for_gemini || 0}</span>
+              <span className="text-xs text-muted-foreground">Analyzed by Gemini</span>
+            </div>
+            <div className="flex flex-col border p-3 rounded-md border-green-200 bg-green-50/50 dark:bg-green-950/20">
+              <span className="text-2xl font-bold text-green-600 dark:text-green-400">{funnel.approved || 0}</span>
+              <span className="text-xs text-green-600/80 dark:text-green-400/80">Approved (Worth Replying)</span>
+            </div>
+            <div className="flex flex-col border p-3 rounded-md">
+              <span className="text-2xl font-bold">{funnel.rejected || 0}</span>
+              <span className="text-xs text-muted-foreground">Rejected by AI</span>
+            </div>
+            <div className="flex flex-col border p-3 rounded-md">
+              <span className="text-2xl font-bold">{funnel.remaining_queued || 0}</span>
+              <span className="text-xs text-muted-foreground">Remaining Queued</span>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
       <div className="grid gap-4 md:grid-cols-2">
         <Card>
           <CardHeader>
@@ -157,7 +227,7 @@ export default async function AnalyticsPage() {
               <div className="flex items-center justify-between mb-1">
                 <span className="text-sm font-medium">Today&apos;s Spend</span>
                 <span className="text-sm text-muted-foreground">
-                  ${(totalTodayCents / 100).toFixed(2)} / ${(dailyBudget / 100).toFixed(2)}
+                  ${formatCost(totalTodayCents)} / ${formatCost(dailyBudget)}
                 </span>
               </div>
               <div className="w-full bg-secondary h-2 rounded-full overflow-hidden">
@@ -167,7 +237,7 @@ export default async function AnalyticsPage() {
                 />
               </div>
               <p className="text-xs text-muted-foreground mt-1 text-right">
-                {dailyBudget - totalTodayCents > 0 ? `$${((dailyBudget - totalTodayCents) / 100).toFixed(2)} application budget remaining` : 'Application budget exhausted'}
+                {dailyBudget - totalTodayCents > 0 ? `$${formatCost(dailyBudget - totalTodayCents)} application budget remaining` : 'Application budget exhausted'}
               </p>
             </div>
 
@@ -175,7 +245,7 @@ export default async function AnalyticsPage() {
               <div className="flex items-center justify-between mb-1">
                 <span className="text-sm font-medium">Monthly Spend</span>
                 <span className="text-sm text-muted-foreground">
-                  ${(totalMonthCents / 100).toFixed(2)} / ${(monthBudget / 100).toFixed(2)}
+                  ${formatCost(totalMonthCents)} / ${formatCost(monthBudget)}
                 </span>
               </div>
               <div className="w-full bg-secondary h-2 rounded-full overflow-hidden">
@@ -185,7 +255,7 @@ export default async function AnalyticsPage() {
                 />
               </div>
               <p className="text-xs text-muted-foreground mt-1 text-right">
-                {monthBudget - totalMonthCents > 0 ? `$${((monthBudget - totalMonthCents) / 100).toFixed(2)} application budget remaining` : 'Application budget exhausted'}
+                {monthBudget - totalMonthCents > 0 ? `$${formatCost(monthBudget - totalMonthCents)} application budget remaining` : 'Application budget exhausted'}
               </p>
             </div>
           </CardContent>
@@ -206,7 +276,7 @@ export default async function AnalyticsPage() {
                   <div key={u.endpoint} className="flex flex-col gap-1">
                     <div className="flex items-center justify-between">
                       <span className="text-sm font-medium truncate pr-4">{u.endpoint}</span>
-                      <span className="text-sm font-bold whitespace-nowrap">${(u.costCents / 100).toFixed(2)}</span>
+                      <span className="text-sm font-bold whitespace-nowrap">${formatCost(u.costCents)}</span>
                     </div>
                     <div className="flex items-center justify-between text-xs text-muted-foreground">
                       <span>{u.requests} requests</span>
@@ -221,27 +291,106 @@ export default async function AnalyticsPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Gemini Usage (This Month)</CardTitle>
+            <CardTitle className="text-base">Gemini Usage (Today)</CardTitle>
+            <p className="text-xs text-muted-foreground mt-1">AI analysis quota and fallback tracking</p>
           </CardHeader>
-          <CardContent>
-            {geminiUsage.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No Gemini analyses this month.</p>
-            ) : (
-              <div className="space-y-4">
-                {geminiUsage.map(u => (
-                  <div key={u.endpoint} className="flex flex-col gap-1 border-b pb-2 last:border-0 last:pb-0">
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm font-medium truncate pr-4">{u.endpoint}</span>
-                      <span className="text-sm font-bold whitespace-nowrap">{u.requests} runs</span>
+          <CardContent className="space-y-6">
+              {(() => {
+                // The daily opportunity-analysis quota should count successful `analyze-opportunity` analyses.
+                const todayAnalyses = todayGeminiUsage.filter(u => u.endpoint.startsWith('analyze-opportunity:'));
+                const primaryRuns = todayAnalyses.filter(u => u.endpoint.includes(AI_MODEL_PRIMARY)).reduce((acc, u) => acc + u.requests, 0);
+                const fallbackRuns = todayAnalyses.filter(u => u.endpoint.includes(AI_MODEL_FALLBACK)).reduce((acc, u) => acc + u.requests, 0);
+                const totalRuns = primaryRuns + fallbackRuns;
+                
+                const configuredMax = userSettings?.maxDailyAiAnalyses || DEFAULT_LIMITS.MAX_DAILY_AI_ANALYSES;
+                const primaryLimit = DEFAULT_LIMITS.MAX_GEMINI_DAILY_ANALYSES;
+                const fallbackLimit = DEFAULT_LIMITS.MAX_GEMINI_FALLBACK_DAILY_ANALYSES;
+                
+                const primaryPercent = (primaryRuns / primaryLimit) * 100;
+                const fallbackPercent = (fallbackRuns / fallbackLimit) * 100;
+                const overallPercent = (totalRuns / configuredMax) * 100;
+                
+                const totalMonthRuns = geminiUsage.filter(u => u.endpoint.startsWith('analyze-opportunity:')).reduce((acc, u) => acc + u.requests, 0);
+                const totalTokens = geminiUsage.filter(u => u.endpoint.startsWith('analyze-opportunity:')).reduce((acc, u) => acc + (u.tokensUsed || 0), 0);
+
+                const isGlobalExhausted = totalRuns >= configuredMax;
+                const isAllModelsExhausted = primaryRuns >= primaryLimit && fallbackRuns >= fallbackLimit;
+                const isPrimaryExhausted = primaryRuns >= primaryLimit;
+
+              return (
+                <>
+                  <div className="space-y-6">
+                    {isGlobalExhausted && (
+                      <div className="bg-destructive/10 text-destructive p-3 rounded-md text-sm mb-4">
+                        Your configured daily analysis limit of {configuredMax} has been reached.
+                      </div>
+                    )}
+                    {!isGlobalExhausted && isAllModelsExhausted && (
+                      <div className="bg-destructive/10 text-destructive p-3 rounded-md text-sm mb-4">
+                        All configured Gemini model quotas are exhausted.
+                      </div>
+                    )}
+                    {!isGlobalExhausted && !isAllModelsExhausted && isPrimaryExhausted && (
+                      <div className="bg-yellow-500/10 text-yellow-600 p-3 rounded-md text-sm mb-4">
+                        Primary daily quota reached — using Gemini 3.5 Flash-Lite.
+                      </div>
+                    )}
+                    <div className="text-sm font-medium mb-4">
+                      Current model: <span className="font-normal text-muted-foreground">{isPrimaryExhausted ? "Fallback" : "Primary"}</span>
                     </div>
-                    <div className="flex items-center justify-between text-xs text-muted-foreground">
-                      <span>Tokens processed</span>
-                      <span>{u.tokensUsed?.toLocaleString() || 0}</span>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-medium">GLOBAL USER LIMIT</span>
+                        <span className="text-sm text-muted-foreground">{totalRuns} / {configuredMax} runs</span>
+                      </div>
+                      <div className="w-full bg-secondary h-2 rounded-full overflow-hidden">
+                        <div className={`h-full ${overallPercent >= 100 ? "bg-destructive" : overallPercent >= 80 ? "bg-yellow-500" : "bg-primary"}`} style={{ width: `${Math.min(overallPercent, 100)}%` }} />
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1 text-right">
+                        {configuredMax - totalRuns > 0 ? `Remaining: ${configuredMax - totalRuns}` : "Remaining: 0"}
+                      </p>
+                    </div>
+  
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-medium">PRIMARY MODEL<br/><span className="text-xs font-normal text-muted-foreground">{AI_MODEL_PRIMARY}</span></span>
+                        <span className="text-sm text-muted-foreground">{primaryRuns} / {primaryLimit} runs</span>
+                      </div>
+                      <div className="w-full bg-secondary h-2 rounded-full overflow-hidden">
+                        <div className={`h-full ${primaryPercent >= 100 ? "bg-destructive" : primaryPercent >= 80 ? "bg-yellow-500" : "bg-primary"}`} style={{ width: `${Math.min(primaryPercent, 100)}%` }} />
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1 text-right">
+                        {primaryLimit - primaryRuns > 0 ? `Remaining: ${primaryLimit - primaryRuns}` : "Remaining: 0"}
+                      </p>
+                    </div>
+  
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-medium">FALLBACK MODEL<br/><span className="text-xs font-normal text-muted-foreground">{AI_MODEL_FALLBACK}</span></span>
+                        <span className="text-sm text-muted-foreground">{fallbackRuns} / {fallbackLimit} runs</span>
+                      </div>
+                      <div className="w-full bg-secondary h-2 rounded-full overflow-hidden">
+                        <div className={`h-full ${fallbackPercent >= 100 ? "bg-destructive" : fallbackPercent >= 80 ? "bg-yellow-500" : "bg-primary"}`} style={{ width: `${Math.min(fallbackPercent, 100)}%` }} />
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1 text-right">
+                        {fallbackLimit - fallbackRuns > 0 ? `Remaining: ${fallbackLimit - fallbackRuns}` : "Remaining: 0"}
+                      </p>
                     </div>
                   </div>
-                ))}
-              </div>
-            )}
+                  <div className="pt-4 border-t flex items-center justify-between text-sm">
+                    <div className="flex flex-col">
+                      <span className="text-muted-foreground">Runs This Month</span>
+                      <span className="font-bold">{totalMonthRuns}</span>
+                    </div>
+                    <div className="flex flex-col text-right">
+                      <span className="text-muted-foreground">Tokens Processed</span>
+                      <span className="font-bold">{totalTokens.toLocaleString()}</span>
+                    </div>
+                  </div>
+                </>
+              );
+            })()}
           </CardContent>
         </Card>
       </div>
