@@ -36,7 +36,8 @@ export function OpportunityCard({ data }: { data: Record<string, any> }) {
   };
 
   const handleOpen = async () => {
-    const url = `https://x.com/${author.username}/status/${post.xPostId}`;
+    const urlHandle = author.username === "[unknown]" ? "i" : author.username;
+    const url = `https://x.com/${urlHandle}/status/${post.xPostId}`;
     window.open(url, "_blank");
     await updateOpportunityStatus(opportunity.id, "OPENED");
   };
@@ -57,8 +58,12 @@ export function OpportunityCard({ data }: { data: Record<string, any> }) {
         <div className="flex items-start justify-between gap-4">
           <div className="flex flex-col gap-1">
             <div className="flex items-center gap-2">
-              <CardTitle className="text-base">{author.displayName}</CardTitle>
-              <span className="text-sm text-muted-foreground">@{author.username}</span>
+              <CardTitle className="text-base">
+                {author.username === "[unknown]" ? "Unknown author" : author.displayName}
+              </CardTitle>
+              {author.username !== "[unknown]" && (
+                <span className="text-sm text-muted-foreground">@{author.username}</span>
+              )}
               {author.isMutual && <Badge variant="secondary" className="text-xs">Mutual</Badge>}
               <span className="text-xs text-muted-foreground ml-2">
                 {new Date(post.postedAt).toLocaleDateString()}
