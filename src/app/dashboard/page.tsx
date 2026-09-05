@@ -3,9 +3,11 @@ import { opportunities } from "@/db/schema/opportunities";
 import { posts } from "@/db/schema/posts";
 import { xUsers } from "@/db/schema/x-users";
 import { generatedReplies } from "@/db/schema/generated-replies";
-import { eq, inArray, desc, notInArray, and } from "drizzle-orm";
+import { eq, and, desc, inArray } from "drizzle-orm";
 import { getCachedSession } from "@/features/auth/lib/session";
 import { OpportunityCard } from "./opportunity-card";
+import { BulkMarkEngagedButton } from "./bulk-mark-engaged-button";
+import { AnalyzeQueuedButton } from "./analyze-queued-button";
 import { redirect } from "next/navigation";
 import { LightbulbIcon } from "lucide-react";
 
@@ -21,7 +23,8 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
   }
 
   const params = await searchParams;
-  const filter = params.filter || "ACTIVE"; // ACTIVE, IGNORED, ENGAGED, ALL
+  const { normalizeOpportunityFilter, buildOpportunityFilter } = await import("@/features/scoring/lib/filters");
+  const filter = normalizeOpportunityFilter(params.filter);
 
   // Find posts the user has already engaged with (outbound interaction)
   const outboundInteractions = await db
@@ -33,31 +36,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
     .map(i => i.postId)
     .filter((id): id is string => id !== null);
 
-  // Build the where condition based on the filter
-  const baseCondition = eq(opportunities.userId, session.user.id);
-  
-  let filterCondition = undefined;
-  if (filter === "ACTIVE") {
-    filterCondition = and(
-      eq(opportunities.worthReplying, true),
-      notInArray(opportunities.status, ["DISMISSED", "ENGAGED", "EXPIRED"]),
-      engagedPostIds.length > 0 ? notInArray(opportunities.postId, engagedPostIds) : undefined
-    );
-  } else if (filter === "IGNORED") {
-    // Either Gemini rejected it, or user dismissed it
-    // Note: Drizzle's `or` is imported below
-    const { or } = await import("drizzle-orm");
-    filterCondition = or(
-      eq(opportunities.worthReplying, false),
-      eq(opportunities.status, "DISMISSED")
-    );
-  } else if (filter === "ENGAGED") {
-    const { or } = await import("drizzle-orm");
-    filterCondition = or(
-      eq(opportunities.status, "ENGAGED"),
-      engagedPostIds.length > 0 ? inArray(opportunities.postId, engagedPostIds) : undefined
-    );
-  }
+  const finalCondition = buildOpportunityFilter(session.user.id, filter, engagedPostIds);
 
   const rawOpportunities = await db
     .select({
@@ -67,8 +46,8 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
     })
     .from(opportunities)
     .innerJoin(posts, eq(opportunities.postId, posts.id))
-    .innerJoin(xUsers, eq(opportunities.xUserId, xUsers.xUserId))
-    .where(and(baseCondition, filterCondition))
+    .leftJoin(xUsers, eq(opportunities.xUserId, xUsers.xUserId))
+    .where(finalCondition)
     .orderBy(desc(opportunities.totalScore))
     .limit(50);
 
@@ -83,10 +62,23 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
   }
 
   // Map them together
-  const formattedData = rawOpportunities.map((row) => ({
-    ...row,
-    generatedReplies: repliesData.filter((r) => r.opportunityId === row.opportunity.id),
-  }));
+  const formattedData = rawOpportunities.map((row) => {
+    const validPostUsername = (row.post.xUsername && row.post.xUsername !== "[unknown]") ? row.post.xUsername : null;
+    const finalUsername = row.author?.username || validPostUsername || row.author?.displayName || "[unknown]";
+    const finalDisplayName = row.author?.displayName || validPostUsername || "[unknown]";
+
+    return {
+      opportunity: row.opportunity,
+      post: row.post,
+      author: {
+        ...(row.author || {}),
+        username: finalUsername,
+        displayName: finalDisplayName,
+        isMutual: row.author?.isMutual || false
+      },
+      generatedReplies: repliesData.filter((r) => r.opportunityId === row.opportunity.id),
+    };
+  });
 
   return (
     <div className="flex flex-col gap-6 w-full max-w-4xl mx-auto">
@@ -95,11 +87,17 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
         <p className="text-muted-foreground mt-1">High-value conversations curated by Phase 4 and analyzed by Gemini.</p>
       </div>
 
-      <div className="flex gap-2 mb-2">
-        <a href="/dashboard?filter=ACTIVE" className={`px-4 py-2 rounded-md text-sm font-medium border ${filter === 'ACTIVE' ? 'bg-primary/10 border-primary/20 text-primary' : 'bg-background hover:bg-muted'}`}>Active</a>
-        <a href="/dashboard?filter=IGNORED" className={`px-4 py-2 rounded-md text-sm font-medium border ${filter === 'IGNORED' ? 'bg-primary/10 border-primary/20 text-primary' : 'bg-background hover:bg-muted'}`}>Ignored / Rejected</a>
-        <a href="/dashboard?filter=ENGAGED" className={`px-4 py-2 rounded-md text-sm font-medium border ${filter === 'ENGAGED' ? 'bg-primary/10 border-primary/20 text-primary' : 'bg-background hover:bg-muted'}`}>Engaged</a>
-        <a href="/dashboard?filter=ALL" className={`px-4 py-2 rounded-md text-sm font-medium border ${filter === 'ALL' ? 'bg-primary/10 border-primary/20 text-primary' : 'bg-background hover:bg-muted'}`}>All</a>
+      <div className="flex flex-wrap items-center gap-2 mb-2">
+        <div className="flex gap-2">
+          <a href="/dashboard?filter=ACTIVE" className={`px-4 py-2 rounded-md text-sm font-medium border ${filter === 'ACTIVE' ? 'bg-primary/10 border-primary/20 text-primary' : 'bg-background hover:bg-muted'}`}>Active</a>
+          <a href="/dashboard?filter=IGNORED" className={`px-4 py-2 rounded-md text-sm font-medium border ${filter === 'IGNORED' ? 'bg-primary/10 border-primary/20 text-primary' : 'bg-background hover:bg-muted'}`}>Ignored / Rejected</a>
+          <a href="/dashboard?filter=ENGAGED" className={`px-4 py-2 rounded-md text-sm font-medium border ${filter === 'ENGAGED' ? 'bg-primary/10 border-primary/20 text-primary' : 'bg-background hover:bg-muted'}`}>Engaged</a>
+          <a href="/dashboard?filter=ALL" className={`px-4 py-2 rounded-md text-sm font-medium border ${filter === 'ALL' ? 'bg-primary/10 border-primary/20 text-primary' : 'bg-background hover:bg-muted'}`}>All</a>
+        </div>
+        <AnalyzeQueuedButton />
+        {filter === "ACTIVE" && formattedData.length > 0 && (
+          <BulkMarkEngagedButton opportunityIds={formattedData.map(d => d.opportunity.id)} />
+        )}
       </div>
 
       {formattedData.length === 0 ? (
