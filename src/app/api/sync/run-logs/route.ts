@@ -44,7 +44,7 @@ export async function GET(request: NextRequest) {
             
             return NextResponse.json({ success: true, run: latestRun, logs });
         }
-    } catch (error) {
+    } catch {
         return NextResponse.json({ success: false, error: "Failed to fetch logs" }, { status: 500 });
     }
 }
