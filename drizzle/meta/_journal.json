@@ -29,6 +29,27 @@
       "when": 1787594275599,
       "tag": "0003_mighty_nick_fury",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1787816939782,
+      "tag": "0004_breezy_corsair",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788108602020,
+      "tag": "0005_wealthy_namora",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788108773657,
+      "tag": "0006_jazzy_la_nuit",
+      "breakpoints": true
     }
   ]
 }
